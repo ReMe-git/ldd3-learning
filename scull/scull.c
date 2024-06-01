@@ -9,7 +9,6 @@ MODULE_LICENSE("DualBSD/GPL");
 static loff_t scull_llseek(struct file*, loff_t, int);
 static ssize_t scull_read(struct file*, char __user*, size_t, loff_t*);
 static ssize_t scull_write(struct file*, const char __user*, size_t, loff_t*);
-//static int scull_ioctl(struct inode*, struct file*, unsigned int, unsigned long); //新内核中ioctl被删除
 static long scull_unblocked_ioctl(struct file*, unsigned int, unsigned long);
 static int scull_open(struct inode*, struct file*);
 static int scull_release(struct inode*, struct file*);
@@ -65,11 +64,10 @@ int scull_release(struct inode* np, struct file* filp)
 	return 0;
 } //release
 
-static
-int register_scull_devnum(void)
+static int __init scull_init(void)
 {
-	int res;
-
+	int res; // varible storing return value
+	
 	if (scull_major) {
 		scull_dev = MKDEV(scull_major, scull_minor);
 		res = register_chrdev_region(scull_dev, scull_ndev, "scull");
@@ -77,12 +75,10 @@ int register_scull_devnum(void)
 	else {
 		res = alloc_chrdev_region(&scull_dev, scull_minor, scull_ndev, "scull");
 	} //alloc major number
+	if (res < 0)
+		return -1;
+	// failed register device number return -1
 
-	return res;
-} //register scull device number
-
-static int __init scull_init(void)
-{
 	return 0;
 } //scull init function
 
