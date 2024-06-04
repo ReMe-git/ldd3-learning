@@ -8,8 +8,15 @@
 #include <linux/string.h>
 
 #include "./scull.h"
+#include "linux/gfp_types.h"
 
 MODULE_LICENSE("DualBSD/GPL");
+
+#ifdef DEBUG
+#define DEBUG_LOG(fmt,arg...) printk(fmt,##arg)
+#else
+#define DEBUG_LOG(fmt,...)
+#endif
 
 static loff_t scull_llseek(struct file*, loff_t, int);
 static ssize_t scull_read(struct file*, char __user*, size_t, loff_t*);
@@ -98,12 +105,35 @@ scull_trim(struct scull_dev *dev)
 static struct scull_qset *
 scull_follow(struct scull_dev *dev, int index)
 {
-	struct scull_qset *dp;
-	int i = 0;
+	struct scull_qset *dp = NULL;
+	
+	if (!dev->data) {
+		dev->data = (struct scull_qset *)kmalloc(sizeof(struct scull_qset), GFP_KERNEL);
+		if (!dev->data) {
+			DEBUG_LOG(KERN_NOTICE"scull_follow: failed alloc memory for qset\n");
+			goto fail;
+		}
+		dev->data->data = NULL;
+		dev->data->next = NULL;
+		DEBUG_LOG(KERN_NOTICE"scull_follow: alloc memory for first qset\n");
+	} // if fist qset is nullptr alloc memory for it
 
 	dp = dev->data;
-	for (int i = 0; i < index && dp != NULL; dp = dp->next); //find dp
-	return i == index ? dp : NULL; //if present return dp else return nullptr
+	for (int i = 0; i < index; dp = dp->next) {
+		if (!dp->next) {
+			dp->next = (struct scull_qset *)kmalloc(sizeof(struct scull_qset), GFP_KERNEL);
+			if (!dp->next) {
+				DEBUG_LOG(KERN_NOTICE"scull_follow: failed alloc memory for qset\n");
+				goto fail;
+			}
+			dp->next->data = NULL;
+			dp->next->next = NULL;
+			DEBUG_LOG(KERN_NOTICE"scull_follow: alloc memory for next qset\n");
+		}
+	} // find target qset pointer
+
+fail:
+	return dp; //if present return dp else return nullptr
 } //scull_follow
 
 static loff_t
@@ -116,7 +146,7 @@ static ssize_t
 scull_read(struct file* filp, char __user* buff, size_t count, loff_t* f_pos)
 {
 	struct scull_dev *dev = filp->private_data;
-	struct scull_qset *dp = dev->data;
+	struct scull_qset *dp;
 	int quantum = dev->quantum, qset = dev->qset;
 	int itemsize = quantum * qset;
 	int item, s_pos, q_pos, rest;
@@ -133,9 +163,11 @@ scull_read(struct file* filp, char __user* buff, size_t count, loff_t* f_pos)
 	q_pos = rest % quantum;
 
 	dp = scull_follow(dev, item);
-	if (dp != NULL || !dp->data || !dp->data[s_pos]) //invalid data pointer
+	if (!dp || !dp->data || !dp->data[s_pos]) {
+		DEBUG_LOG(KERN_WARNING"scull_read: invalid data pointer\n");		
 		goto out;
-
+	} //invalid data pointer
+	DEBUG_LOG(KERN_NOTICE"scull_read: find target qset\n");
 	if (count > quantum - q_pos) //count of out quantum
 		count = quantum - q_pos;
 
@@ -143,6 +175,7 @@ scull_read(struct file* filp, char __user* buff, size_t count, loff_t* f_pos)
 		retval = -EFAULT;
 		goto out;
 	} //read data
+	DEBUG_LOG(KERN_NOTICE"scull_read: copy %d bytes to userspace\n", count);
 	*f_pos += count;
 	retval = count;
 out:
@@ -166,17 +199,20 @@ scull_write(struct file* filp, const char __user* buff, size_t count, loff_t* f_
 	dp = scull_follow(dev, item);
 	if (dp == NULL)
 		goto out;
+	DEBUG_LOG(KERN_NOTICE"scull_write: find target qset\n");
 	if (!dp->data) {
 		dp->data = kmalloc(qset * sizeof(char *), GFP_KERNEL);
 		if (!dp->data)
 			goto out;
 		memset(dp->data, 0, qset * sizeof(char *));
+		DEBUG_LOG(KERN_NOTICE"scull_write: alloc memory for target qset data\n");
 	} //alloc memory if qset is nullptr
 
 	if (!dp->data[s_pos]) {
 		dp->data[s_pos] = kmalloc(quantum, GFP_KERNEL);
 		if (!dp->data[s_pos])
 			goto out;
+		DEBUG_LOG(KERN_NOTICE"scull_write: alloc memory for target quantum\n");
 	} //alloc memory if quantum is nullptr
 	if (count > quantum - q_pos)
 		count = quantum - q_pos;
@@ -184,8 +220,12 @@ scull_write(struct file* filp, const char __user* buff, size_t count, loff_t* f_
 		retval = -EFAULT;
 		goto out;
 	} //read data
+	DEBUG_LOG(KERN_NOTICE"scull_write: copy %d bytes from userspace\n", count);
 	*f_pos += count;
 	retval = count;
+
+	if (*f_pos > dev->size)
+		dev->size = *f_pos;
 out:
 	return retval;
 } //write
@@ -227,7 +267,7 @@ scull_setup_cdev(struct scull_dev *dev, int index)
 	dev->cdev.owner = THIS_MODULE;
 	err = cdev_add(&dev->cdev, devnum, 1);
 	if (err < 0) {
-		printk(KERN_NOTICE"register_scull_chrdev: \
+		DEBUG_LOG(KERN_NOTICE"register_scull_chrdev: \
 				failed register scull%d, error %d\n", index, err);
 	} //if failed print warning message
 
@@ -246,10 +286,10 @@ static int __init scull_init(void)
 		scull_major = MAJOR(scull_devno);
 	} //alloc major number
 	if (res < 0) {
-		printk(KERN_WARNING"scull_init: failed alloc device numbers, error %d\n", res);
+		DEBUG_LOG(KERN_WARNING"scull_init: failed alloc device numbers, error %d\n", res);
 		return res;
-	}// failed register device number return -1
-	printk(KERN_NOTICE"scull_init: succeed register device numbers, major is %d\n", scull_major);
+	}// failed register device number return err
+	DEBUG_LOG(KERN_NOTICE"scull_init: succeed register device numbers, major is %d\n", scull_major);
 	
 	scull_devices = kmalloc(sizeof(struct scull_dev) * scull_ndev, GFP_KERNEL);
 	if (!scull_devices) {
@@ -261,10 +301,12 @@ static int __init scull_init(void)
 	for (i = 0; i < scull_ndev; i++) {
 		scull_devices[i].quantum = scull_quantum;
 		scull_devices[i].qset = scull_qset;
+		scull_devices[i].size = 0;
+		scull_devices[i].data = NULL;
 		scull_setup_cdev(&scull_devices[i], i);
 	} //register char devices
 	
-	printk(KERN_NOTICE"scull_init: succeed install module\n");
+	DEBUG_LOG(KERN_NOTICE"scull_init: succeed install module\n");
 	return 0;
 
 fail:
@@ -277,10 +319,11 @@ static void __exit scull_exit(void)
 
 	for (i = 0; i < scull_ndev; i++) {
 		cdev_del(&scull_devices[i].cdev);
+		scull_trim(&scull_devices[i]);
 	}
 	kfree(scull_devices);
 	unregister_chrdev_region(scull_devno, scull_ndev);
-	printk(KERN_NOTICE"scull_exit: succeed remove module\n");
+	DEBUG_LOG(KERN_NOTICE"scull_exit: succeed remove module\n");
 } //scull exit function
 
 module_init(scull_init);
