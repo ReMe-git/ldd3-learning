@@ -310,7 +310,7 @@ static int __init scull_init(void)
 		scull_setup_cdev(&scull_devices[i], i);
 	} //register char devices
 	
-	NORM_LOG("succeed install module, first device number is %s\n", buffer);
+	NOTICE_LOG("succeed install module, first device number is %s\n", buffer);
 	return 0;
 
 fail:
@@ -325,7 +325,7 @@ static void __exit scull_exit(void)
 	}
 	kfree(scull_devices);
 	unregister_chrdev_region(scull_devno, scull_ndev);
-	NORM_LOG("succeed remove module\n");
+	NOTICE_LOG("succeed remove module\n");
 } //scull exit function
 
 module_init(scull_init);
