@@ -6,8 +6,11 @@
 #include <linux/slab.h> //kmalloc, kfree
 #include <linux/uaccess.h> //copy_to_user, copy_from_user
 #include <linux/string.h>
+#include <linux/semaphore.h>
+#include <linux/rwsem.h>
 
 #include "./scull.h"
+#include "linux/kdev_t.h"
 #define DEBUG
 #include "./log.h"
 
@@ -54,6 +57,7 @@ struct scull_dev {
 	int qset;
 	unsigned long size;
 	struct cdev cdev;
+	struct rw_semaphore sem;
 }; //scull device
 
 struct scull_dev *scull_devices;
@@ -146,7 +150,8 @@ scull_read(struct file* filp, char __user* buff, size_t count, loff_t* f_pos)
 	int itemsize = quantum * qset;
 	int item, s_pos, q_pos, rest;
 	ssize_t retval = 0;
-
+	
+	down_read(&dev->sem);
 	if (*f_pos > dev->size) //f_pos out of size
 		goto out;
 	if (*f_pos + count > dev->size) //read out of size
@@ -174,6 +179,7 @@ scull_read(struct file* filp, char __user* buff, size_t count, loff_t* f_pos)
 	*f_pos += count;
 	retval = count;
 out:
+	up_read(&dev->sem);
 	return retval;
 } //read
 
@@ -186,7 +192,8 @@ scull_write(struct file* filp, const char __user* buff, size_t count, loff_t* f_
 	int itemsize = quantum * qset;
 	int item, rest, s_pos, q_pos;
 	ssize_t retval = -ENOPARAM;
-
+	
+	down_write(&dev->sem);
 	item = (long)*f_pos / itemsize;
 	rest = (long)*f_pos % itemsize;
 	s_pos = rest / quantum;
@@ -220,6 +227,7 @@ scull_write(struct file* filp, const char __user* buff, size_t count, loff_t* f_
 	if (*f_pos > dev->size)
 		dev->size = *f_pos;
 out:
+	up_write(&dev->sem);
 	return retval;
 } //write
 
@@ -232,7 +240,9 @@ scull_open(struct inode* inode, struct file* filp)
 	filp->private_data = (void *)dev; //save for other methods
 	
 	if ((filp->f_flags & O_ACCMODE) == O_WRONLY) {
+		down_write(&dev->sem);
 		scull_trim(dev);
+		up_write(&dev->sem);
 	} //if write only mode clean data
 	return 0;
 } // open
@@ -268,6 +278,7 @@ scull_setup_cdev(struct scull_dev *dev, int index)
 static int __init scull_init(void)
 {
 	int res, i; // varible storing return value
+	char buffer[32]; //store device number
 
 	if (scull_major) {
 		scull_devno = MKDEV(scull_major, scull_minor);
@@ -281,8 +292,8 @@ static int __init scull_init(void)
 		ERR_LOG("failed alloc device numbers, error %d\n", res);
 		return res;
 	}// failed register device number return err
-	NORM_LOG("succeed register device, major is %d\n", scull_major);
-	
+	print_dev_t(buffer, scull_devno);
+
 	scull_devices = kmalloc(sizeof(struct scull_dev) * scull_ndev, GFP_KERNEL);
 	if (!scull_devices) {
 		res = -ENOPARAM;
@@ -295,10 +306,11 @@ static int __init scull_init(void)
 		scull_devices[i].qset = scull_qset;
 		scull_devices[i].size = 0;
 		scull_devices[i].data = NULL;
+		init_rwsem(&scull_devices[i].sem);
 		scull_setup_cdev(&scull_devices[i], i);
 	} //register char devices
 	
-	NORM_LOG("succeed install module\n");
+	NORM_LOG("succeed install module, first device number is %s\n", buffer);
 	return 0;
 
 fail:
@@ -307,9 +319,7 @@ fail:
 
 static void __exit scull_exit(void)
 {
-	int i = 0;
-
-	for (i = 0; i < scull_ndev; i++) {
+	for (int i = 0; i < scull_ndev; i++) {
 		cdev_del(&scull_devices[i].cdev);
 		scull_trim(&scull_devices[i]);
 	}
